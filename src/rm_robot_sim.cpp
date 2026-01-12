@@ -407,8 +407,10 @@ int main()
 						"camera", "armor_pnp", meas_orientation, meas_position);
 					*frame_msg.add_transforms() = armor_pnp_tf;
 
-					Eigen::Quaterniond filtered_orientation(
-						Eigen::AngleAxisd(yawWorldToCamera(filtered_yaw), Eigen::Vector3d::UnitZ()));
+					Eigen::Matrix3d R_armor_world =
+						Eigen::AngleAxisd(filtered_yaw, Eigen::Vector3d::UnitZ()).toRotationMatrix();
+					Eigen::Matrix3d R_armor_cam = Rbc.transpose() * Rwb.transpose() * R_armor_world;
+					Eigen::Quaterniond filtered_orientation(R_armor_cam);
 					Eigen::Vector3d filtered_cam = worldToCamera(filtered_armor_world);
 					foxglove::FrameTransform filtered_transform = createFrameTransformMessage(
 						"camera", "armor_filtered", filtered_orientation, filtered_cam);
