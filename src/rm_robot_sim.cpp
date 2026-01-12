@@ -48,6 +48,8 @@ std::string getLocalIPAddress();
 static std::string SerializeFdSet(const google::protobuf::Descriptor *toplevelDescriptor);
 // 将机器人的装甲板转换为场景实体消息
 static void convertArmorToSceneEntity(foxglove::SceneEntity* entity, const Robot& robot);
+// 将估计的装甲板转换为场景实体消息
+static void convertEstimatedArmorToSceneEntity(foxglove::SceneEntity* entity, const Robot& robot);
 // 将相机转换为场景实体消息
 static void convertCameraToSceneEntity(foxglove::SceneEntity* entity, const Camera& camera);
 // 创建压缩图像消息
@@ -62,6 +64,8 @@ static foxglove::FrameTransform createFrameTransformMessage(const std::string& p
 static bool isYawInRange(const Eigen::Quaterniond& pose_quaternion);
 // 绘制装甲板的像素坐标点
 static void drawArmorPoints(const Robot& enemy_robot, const Camera& camera, cv::Mat& image);
+// 绘制估计的装甲板像素坐标点
+static void drawEstimatedArmorPoints(const Robot& estimated_robot, const Camera& camera, cv::Mat& image);
 
 // 返回机器人看到的装甲板四个角点
 std::vector<std::vector<Eigen::Vector2d>> get_armorPixelPoints();
@@ -248,6 +252,7 @@ int main()
 	auto last_predict_time = std::chrono::steady_clock::now();
 	int log_counter = 0;
 	const double armor_jump_yaw_diff = 1.0;  // rad
+	int last_armor_idx = -1;
 
 	// 主循环，持续发送场景更新消息直到接收到关闭信号
 	while (running)
@@ -266,15 +271,6 @@ int main()
 		enemy_robot.setAngularVelocity(Eigen::Vector3d(0, 0, M_PI_2));
 		enemy_robot.updatePosition(0.05);
 
-		// channel0：场景信息
-		foxglove::SceneUpdate scene_msg;
-		auto* entity = scene_msg.add_entities();
-		*entity->mutable_timestamp() = google::protobuf::util::TimeUtil::NanosecondsToTimestamp(now); // 设置时间戳
-		entity->set_frame_id("root");           // 设置帧 ID
-		convertArmorToSceneEntity(entity, enemy_robot);
-		convertCameraToSceneEntity(entity, camera);
-		serializedMsgs[0] = scene_msg.SerializeAsString();
-
 		// channel1：坐标变换
 		auto pose = enemy_robot.getCubePose(1);
 		auto Rcw = Rbc.transpose() * Rwb.transpose() * pose.first;
@@ -288,8 +284,6 @@ int main()
 		// channel2：图像
 		cv::Mat blackImage = cv::Mat::zeros(IMAGE_HEIGHT, IMAGE_WIDTH, CV_8UC3);
 		drawArmorPoints(enemy_robot, camera, blackImage);
-		foxglove::CompressedImage img_msg = createCompressedImageMessage(blackImage, "jpeg", "camera");
-		serializedMsgs[2] = img_msg.SerializeAsString();
 
 		// PnP measurement + EKF smoothing using rm_auto_aim workflow
 		if (!armorPixelPoints.empty()) {
@@ -324,17 +318,47 @@ int main()
 						robot_radius;
 					ekf.setState(ekf_state);
 					ekf_initialized = true;
+					if (!armorPixelIndices.empty()) {
+						last_armor_idx = armorPixelIndices.front();
+					}
 				} else {
 					ekf_state = ekf.predict();
-					ekf_state = ekf.update(z);
+					double predicted_yaw = ekf_state(6);
+					double yaw_diff = std::fmod(meas_world_yaw - predicted_yaw + M_PI, 2 * M_PI) - M_PI;
+
+					int armor_idx = -1;
+					bool armor_idx_valid = false;
+					if (!armorPixelIndices.empty()) {
+						armor_idx = armorPixelIndices.front();
+						armor_idx_valid = true;
+					}
+					bool armor_idx_changed = armor_idx_valid && last_armor_idx >= 0 &&
+						armor_idx != last_armor_idx;
+
+					if (std::fabs(yaw_diff) > armor_jump_yaw_diff || armor_idx_changed) {
+						handleArmorJump(meas_world, meas_world_yaw, ekf_state);
+						ekf.setState(ekf_state);
+					} else {
+						ekf_state = ekf.update(z);
+					}
+
+					if (armor_idx_valid) {
+						last_armor_idx = armor_idx;
+					}
 				}
 
-				Eigen::Vector3d filtered_position = Eigen::Vector3d::Zero();  // world
+				Eigen::Vector3d filtered_position = Eigen::Vector3d::Zero();  // world center
 				double filtered_yaw = 0.0;  // world yaw
+				double filtered_radius = robot_radius;
 				if (ekf_initialized) {
 					filtered_position = Eigen::Vector3d(ekf_state(0), ekf_state(2), ekf_state(4));
 					filtered_yaw = ekf_state(6);
+					filtered_radius = ekf_state(8);
 				}
+				Eigen::Vector3d filtered_armor_world(
+					filtered_position.x() - filtered_radius * std::cos(filtered_yaw),
+					filtered_position.y() - filtered_radius * std::sin(filtered_yaw),
+					filtered_position.z());
 
 				// Ground truth armor (matching the projected armor index)
 				Eigen::Vector3d gt_cam = Eigen::Vector3d::Zero();
@@ -361,9 +385,9 @@ int main()
 						<< " yaw " << gt_yaw
 						<< " | world: " << gt_world.transpose()
 						<< " yaw " << gt_world_yaw << "\n"
-						<< "  filtered  cam: " << worldToCamera(filtered_position).transpose()
+						<< "  filtered  cam: " << worldToCamera(filtered_armor_world).transpose()
 						<< " yaw " << yawWorldToCamera(filtered_yaw)
-						<< " | world: " << filtered_position.transpose()
+						<< " | world: " << filtered_armor_world.transpose()
 						<< " yaw " << filtered_yaw << "\n";
 
 					// Robot center state vs ground truth (world frame)
@@ -376,16 +400,8 @@ int main()
 							  << "\n";
 				}
 
-				// Armor jump handling: if yaw jumps while still seeing same armor, reset state to measurement
-				double yaw_diff = std::fabs(meas_world_yaw - filtered_yaw);
-				yaw_diff = std::fmod(yaw_diff + M_PI, 2 * M_PI) - M_PI;  // wrap to [-pi, pi]
-				if (std::fabs(yaw_diff) > armor_jump_yaw_diff && ekf_initialized) {
-					handleArmorJump(meas_world, meas_world_yaw, ekf_state);
-					ekf.setState(ekf_state);
-				}
-
 				if (ekf_initialized) {
-					// Publish both raw PnP armor pose and filtered center to help debugging
+					// Publish both raw PnP armor pose and filtered armor pose to help debugging
 					Eigen::Quaterniond meas_orientation(Eigen::AngleAxisd(meas_yaw, Eigen::Vector3d::UnitZ()));
 					foxglove::FrameTransform armor_pnp_tf = createFrameTransformMessage(
 						"camera", "armor_pnp", meas_orientation, meas_position);
@@ -393,13 +409,41 @@ int main()
 
 					Eigen::Quaterniond filtered_orientation(
 						Eigen::AngleAxisd(yawWorldToCamera(filtered_yaw), Eigen::Vector3d::UnitZ()));
-					Eigen::Vector3d filtered_cam = worldToCamera(filtered_position);
+					Eigen::Vector3d filtered_cam = worldToCamera(filtered_armor_world);
 					foxglove::FrameTransform filtered_transform = createFrameTransformMessage(
 						"camera", "armor_filtered", filtered_orientation, filtered_cam);
 					*frame_msg.add_transforms() = filtered_transform;
 				}
 			}
 		}
+
+		Robot estimated_robot;
+		bool have_estimated_robot = false;
+		if (ekf_initialized) {
+			Eigen::Vector3d filtered_position(ekf_state(0), ekf_state(2), ekf_state(4));
+			double filtered_yaw = ekf_state(6);
+			estimated_robot = Robot(filtered_position, robot_radius, "root");
+			Eigen::Quaterniond estimated_orientation(
+				Eigen::AngleAxisd(filtered_yaw, Eigen::Vector3d::UnitZ()));
+			estimated_robot.setOrientation(estimated_orientation);
+			drawEstimatedArmorPoints(estimated_robot, camera, blackImage);
+			have_estimated_robot = true;
+		}
+
+		// channel0：场景信息
+		foxglove::SceneUpdate scene_msg;
+		auto* entity = scene_msg.add_entities();
+		*entity->mutable_timestamp() = google::protobuf::util::TimeUtil::NanosecondsToTimestamp(now); // 设置时间戳
+		entity->set_frame_id("root");           // 设置帧 ID
+		convertArmorToSceneEntity(entity, enemy_robot);
+		if (have_estimated_robot) {
+			convertEstimatedArmorToSceneEntity(entity, estimated_robot);
+		}
+		convertCameraToSceneEntity(entity, camera);
+		serializedMsgs[0] = scene_msg.SerializeAsString();
+
+		foxglove::CompressedImage img_msg = createCompressedImageMessage(blackImage, "jpeg", "camera");
+		serializedMsgs[2] = img_msg.SerializeAsString();
 
 		*frame_msg.add_transforms() = frame_robot;
 		*frame_msg.add_transforms() = frame_imu;
@@ -515,6 +559,43 @@ static void convertArmorToSceneEntity(foxglove::SceneEntity* entity, const Robot
         color->set_g(robot.getArmor()[i].color.y());
         color->set_b(robot.getArmor()[i].color.z());
         color->set_a(robot.getArmor()[i].color.w());
+    }
+}
+
+static void convertEstimatedArmorToSceneEntity(foxglove::SceneEntity* entity, const Robot& robot) {
+    const Eigen::Vector4d estimated_color(1.0, 0.0, 1.0, 0.6);
+    for (int i = 0; i < robot.getArmor().size(); ++i) {
+        auto pose = robot.getCubePose(i);
+        const Eigen::Quaterniond& pose_quaternion = pose.first;
+        const Eigen::Vector3d& pose_translation = pose.second;
+
+        auto *cube_msg = entity->add_cubes(); // 添加立方体
+
+        // 设置立方体大小
+        auto *size = cube_msg->mutable_size();
+        size->set_x(robot.getArmor()[i].size.x());
+        size->set_y(robot.getArmor()[i].size.y());
+        size->set_z(robot.getArmor()[i].size.z());
+
+        // 设置立方体位置
+        auto *position = cube_msg->mutable_pose()->mutable_position();
+        position->set_x(pose_translation.x());
+        position->set_y(pose_translation.y());
+        position->set_z(pose_translation.z());
+
+        // 设置立方体方向
+        auto *orientation = cube_msg->mutable_pose()->mutable_orientation();
+        orientation->set_w(pose_quaternion.w());
+        orientation->set_x(pose_quaternion.x());
+        orientation->set_y(pose_quaternion.y());
+        orientation->set_z(pose_quaternion.z());
+
+        // 设置立方体颜色
+        auto *color = cube_msg->mutable_color();
+        color->set_r(estimated_color.x());
+        color->set_g(estimated_color.y());
+        color->set_b(estimated_color.z());
+        color->set_a(estimated_color.w());
     }
 }
 
@@ -703,6 +784,36 @@ static void drawArmorPoints(const Robot& enemy_robot, const Camera& camera, cv::
 			armorPixelIndices.push_back(i);
 		}
     }
+}
+
+static void drawEstimatedArmorPoints(const Robot& estimated_robot, const Camera& camera, cv::Mat& image) {
+	const cv::Scalar estimated_color(255, 0, 255); // Magenta
+
+	for (int i = 0; i < 4; ++i) {
+		auto world_points = estimated_robot.getCube4Point3d(i);
+		auto pixel_points = camera.worldToPixel(world_points, Rwb, twb);
+
+		bool in_bounds = true;
+		std::vector<cv::Point> poly;
+		poly.reserve(pixel_points.size());
+		for (const auto& pixel_point : pixel_points) {
+			if (pixel_point.x() < 0 || pixel_point.x() >= image.cols ||
+				pixel_point.y() < 0 || pixel_point.y() >= image.rows) {
+				in_bounds = false;
+				break;
+			}
+			poly.emplace_back(pixel_point.x(), pixel_point.y());
+		}
+
+		if (!in_bounds || poly.size() != 4) {
+			continue;
+		}
+
+		cv::polylines(image, poly, true, estimated_color, 2);
+		for (const auto& point : poly) {
+			cv::circle(image, point, 3, estimated_color, -1);
+		}
+	}
 }
 
 std::vector<std::vector<Eigen::Vector2d>> get_armorPixelPoints(){

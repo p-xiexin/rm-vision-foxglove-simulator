@@ -1,4 +1,5 @@
 #include <Eigen/Dense>
+#include <iostream>
 
 #define IMAGE_WIDTH 1280
 #define IMAGE_HEIGHT 1024

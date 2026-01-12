@@ -29,6 +29,23 @@ RoboMaster 视觉自瞄环节算法迭代频繁、硬件调试成本高。单靠
 - 做为视觉通信层的实验“沙箱”，尽情试错
 - 完全剥离硬件干扰，单独验证视觉算法、跟踪与预测模型
 
+## EKF 说明
+
+`src/rm_robot_sim.cpp` 内置了一个简化的 EKF，用于从 PnP 测量中平滑估计机器人中心与姿态。定义如下。
+
+- 输入量 (观测向量 z，世界坐标系)：  
+  `z = [x_armor, y_armor, z_armor, yaw_armor]`  
+  其中 `x_armor,y_armor,z_armor` 为 PnP 得到的装甲板中心位置（由相机坐标转换到世界坐标），`yaw_armor` 为装甲板姿态的世界坐标 yaw。
+- 状态量 (9 维状态向量 x)：  
+  `x = [x_c, v_x, y_c, v_y, z_c, v_z, yaw, v_yaw, r]`  
+  其中 `x_c,y_c,z_c` 是机器人中心位置，`v_x,v_y,v_z` 是中心速度，`yaw` 是机器人朝向，`v_yaw` 是角速度，`r` 是装甲板环绕半径。
+- 观测模型：  
+  根据中心位置与半径，得到装甲板中心：  
+  `x_armor = x_c - r * cos(yaw)`  
+  `y_armor = y_c - r * sin(yaw)`  
+  `z_armor = z_c`  
+  `yaw_armor = yaw`
+
 ## 下一步计划
 
 * [x] 我们计划提供将 chenjun 的 [rm-vision](https://github.com/chenjunnn/rm_auto_aim) 对接本平台的示例工程，支持大家参考和体验目前优秀算法在纯仿真环境下的效果。
@@ -50,7 +67,7 @@ RoboMaster 视觉自瞄环节算法迭代频繁、硬件调试成本高。单靠
   ./build/rm_robot_sim
   ```
 
-  打开https://app.foxglove.dev/可视化查看结果
+  打开 https://app.foxglove.dev/ 可视化查看结果
 
 ## 关于本项目
 
@@ -59,5 +76,4 @@ RoboMaster 视觉自瞄环节算法迭代频繁、硬件调试成本高。单靠
 - 拥抱交流，欢迎讨论、建议和 PR！
 
 > 这个平台的初衷：让 RoboMaster 视觉自瞄开发更自由、少挨打、多点乐趣～
-
 
