@@ -1,11 +1,11 @@
-# foxglove_cpp_example
+# rm-vision-foxglove-simulator
 
 ![](./doc/ssr.gif)
 
 
 ## 项目简介
 
-**foxglove_websocket_cpp** 是一个面向 RoboMaster 视觉自瞄系统开发的轻量级实验平台。使用 Foxglove WebSocket 协议，帮助开发者方便地把自己的自瞄算法和各种仿真工具连起来，快速搭建和验证视觉相关功能。目前还是实验阶段，欢迎大家体验、吐槽和参与改进。
+**rm-vision-foxglove-simulator** 是一个面向 RoboMaster 视觉自瞄系统开发的轻量级实验平台。使用 Foxglove WebSocket 协议，帮助开发者方便地把自己的自瞄算法和各种仿真工具连起来，快速搭建和验证视觉相关功能。目前还是实验阶段，欢迎大家体验、吐槽和参与改进。
 
 ## 动机
 
@@ -55,7 +55,7 @@ RoboMaster 视觉自瞄环节算法迭代频繁、硬件调试成本高。单靠
 
 1. 克隆仓库：
    ```bash
-   git clone https://github.com/p-xiexin/foxglove_websocket_cpp.git
+   git clone https://github.com/p-xiexin/rm-vision-foxglove-simulator.git
    ```
 2. 按说明或参考代码编译运行，对接你的自瞄模块或适配仿真数据。
   ```bash
